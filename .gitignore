@@ -1,0 +1,20 @@
+# Roblox / Rojo
+*.rbxl
+*.rbxlx
+*.rbxm
+/build/
+/out/
+
+# ОС и IDE
+.DS_Store
+Thumbs.db
+.vscode/
+*.log
+
+# Временные/кеш
+temp/
+*.tmp
+
+# Большие исходники графики
+*.psd
+*.xcf
