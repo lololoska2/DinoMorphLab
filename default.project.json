@@ -23,6 +23,12 @@
           "$path": "src/Client"
         }
       }
-    }
+    },
+    "ReplicatedFirst": {
+    "$className": "ReplicatedFirst",
+    "ReplicatedFirst": {
+    "$path": "src/ReplicatedFirst"
+  }
+}
   }
 }
