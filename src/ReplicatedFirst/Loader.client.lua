@@ -75,7 +75,7 @@ local assetsToLoad = {
 	game:GetService("ReplicatedStorage"),
 	game:GetService("StarterGui"),
 }
--- Можно вручную добавить модели/изображения:
+-- Можно вручную добавить модели/изображения:ы
 -- table.insert(assetsToLoad, game.ReplicatedStorage.MyModel)
 
 local totalAssets = #assetsToLoad

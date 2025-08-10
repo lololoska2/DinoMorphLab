@@ -29,6 +29,13 @@
     "ReplicatedFirst": {
     "$path": "src/ReplicatedFirst"
   }
-}
+},
+
+  "ServerStorage": {
+			"$className": "ServerStorage",
+			"Config": {
+				"$path": "src/ServerStorage/Config"
+			}
+		}
   }
 }
