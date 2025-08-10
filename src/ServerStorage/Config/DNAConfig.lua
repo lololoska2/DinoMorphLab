@@ -10,14 +10,24 @@ Config.RARITY_WEIGHTS = {
 	Mythic   = 1;
 }
 
+-- Какие статы модифицируем аффиксом
+Config.AFFIX_STATS = { "Mass", "Jump", "Speed" }
+
+-- Диапазоны аффиксов по РЕДКОСТИ (значения — ДОЛИ, не проценты!)
+-- Common:   -5% .. +5%     → -0.05 .. +0.05
+-- Uncommon: -15%.. +15%    → -0.15 .. +0.15
+-- Rare:     -50%.. +50%    → -0.50 .. +0.50
+-- Mythic:   -200%.. +150%  → -2.00 .. +1.50
+Config.AFFIX_BY_RARITY = {
+	Common   = { min = -0.05, max =  0.05 },
+	Uncommon = { min = -0.15, max =  0.15 },
+	Rare     = { min = -0.50, max =  0.50 },
+	Mythic   = { min = -2.00, max =  1.50 },
+}
+
 -- Диапазон веса блока, кг
 Config.WEIGHT_MIN = 0.1
 Config.WEIGHT_MAX = 5.0
-
--- Аффикс: ±5–10% к случайному стату
-Config.AFFIX_PERCENT_MIN = 0.05
-Config.AFFIX_PERCENT_MAX = 0.10
-Config.AFFIX_STATS = { "Mass", "Jump", "Speed" } -- можно расширить позже
 
 -- 30 «вкусов»
 Config.FLAVORS = {
@@ -27,7 +37,7 @@ Config.FLAVORS = {
 }
 
 -- Pity: гарантировать >= Rare после N неудачных попыток
-Config.PITY_THRESHOLD = 20
-Config.PITY_MIN_RARITY = "Rare"
+Config.PITY_THRESHOLD   = 20
+Config.PITY_MIN_RARITY  = "Rare"
 
 return Config

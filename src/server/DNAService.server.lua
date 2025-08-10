@@ -1,9 +1,9 @@
 --!strict
 -- ServerScriptService/Server/DNAService.server.lua
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
-local HttpService = game:GetService("HttpService")
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local ServerStorage      = game:GetService("ServerStorage")
+local HttpService        = game:GetService("HttpService")
 
 local Config = require(ServerStorage:WaitForChild("Config"):WaitForChild("DNAConfig"))
 
@@ -81,30 +81,37 @@ local function rollRarityWithPity(player: Player): string
 	return rolled
 end
 
+-- === Генерация блока ===
 local function generateBlock(player: Player): {[string]: any}
-	local rarity = rollRarityWithPity(player)
+	local rarity   = rollRarityWithPity(player)
 	local weightKg = math.round(randRange(Config.WEIGHT_MIN, Config.WEIGHT_MAX) * 100) / 100
 
 	local affixStat = chooseOne(Config.AFFIX_STATS)
-	local affixSign = (math.random() < 0.5) and -1 or 1
-	local affixMagnitude = randRange(Config.AFFIX_PERCENT_MIN, Config.AFFIX_PERCENT_MAX)
-	local affixPercent = affixSign * affixMagnitude
 
-	local flavor = chooseOne(Config.FLAVORS)
+	-- Новый расчёт аффикса: берём диапазон по редкости
+	local range = Config.AFFIX_BY_RARITY[rarity]
+	if not range then range = { min = -0.10, max = 0.10 } end -- safety fallback
+
+	-- Генерируем долю и сразу переводим в проценты
+	local affixPercent = randRange(range.min, range.max) * 100
+	-- Округляем до 1 знака после запятой
+	affixPercent = math.floor(affixPercent * 10 + 0.5) / 10
+
+	local flavor  = chooseOne(Config.FLAVORS)
 	local barcode = makeBarcode(player)
 
 	local block = {
-		id = HttpService:GenerateGUID(false),
-		barcode = barcode,
-		rarity = rarity,
-		weightKg = weightKg,
-		flavor = flavor,
-		affix = {
-			stat = affixStat,
-			percent = math.round(affixPercent * 1000) / 1000,
+		id        = HttpService:GenerateGUID(false),
+		barcode   = barcode,
+		rarity    = rarity,
+		weightKg  = weightKg,
+		flavor    = flavor,
+		affix     = {
+			stat    = affixStat,
+			percent = string.format("%+.1f%%", affixPercent) -- например "+7.5%" или "-3.0%"
 		},
 		createdAt = os.time(),
-		owner = player.UserId,
+		owner     = player.UserId,
 	}
 	return block
 end
@@ -129,13 +136,13 @@ local function storeBlockInstance(player: Player, data: {[string]: any})
 	local folder = Instance.new("Folder")
 	folder.Name = string.format("Block_%s", shortId(data.id))
 
-	folder:SetAttribute("Rarity", data.rarity)
-	folder:SetAttribute("WeightKg", data.weightKg)
-	folder:SetAttribute("Flavor", data.flavor)
-	folder:SetAttribute("Barcode", data.barcode)
-	folder:SetAttribute("AffixStat", data.affix.stat)
-	folder:SetAttribute("AffixPercent", data.affix.percent)
-	folder:SetAttribute("CreatedAt", data.createdAt)
+	folder:SetAttribute("Rarity",        data.rarity)
+	folder:SetAttribute("WeightKg",      data.weightKg)
+	folder:SetAttribute("Flavor",        data.flavor)
+	folder:SetAttribute("Barcode",       data.barcode)
+	folder:SetAttribute("AffixStat",     data.affix.stat)
+	folder:SetAttribute("AffixPercent", tostring(data.affix.percent))
+	folder:SetAttribute("CreatedAt",     data.createdAt)
 
 	folder.Parent = inv
 	return folder
@@ -146,7 +153,7 @@ getRandomBlockRF.OnServerInvoke = function(player: Player)
 	ensurePityAttrs(player)
 	local blockData = generateBlock(player)
 	storeBlockInstance(player, blockData) -- кладём в инвентарь (Blocks)
-	return blockData                        -- и отдаём клиенту
+	return blockData                      -- и отдаём клиенту
 end
 
 print("[DNAService] Ready: RemoteFunction GetRandomBlock() is live.")
