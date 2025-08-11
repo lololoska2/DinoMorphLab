@@ -1,36 +1,195 @@
 --// ServerScriptService/Leaderstats.server.lua
+-- Автосейв профиля + инвентарь Blocks через дочерние Value-объекты (НЕ атрибуты)
 
-local Players = game:GetService("Players")
-local ServerScriptService = game:GetService("ServerScriptService")
-local RunService = game:GetService("RunService")
+--!strict
+local Players            = game:GetService("Players")
+local ServerScriptService= game:GetService("ServerScriptService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local HttpService        = game:GetService("HttpService")
 
--- Подключаем ProfileService (положи модуль в ServerScriptService/Modules/ProfileService)
+-- ProfileService должен лежать в ServerScriptService/Modules/ProfileService
 local ProfileService = require(ServerScriptService:WaitForChild("Modules"):WaitForChild("ProfileService"))
 
--- Схема данных игрока (то, что сохраняем)
+-- ---------- СХЕМА ДАННЫХ ----------
+-- Blocks хранится как массив таблиц вида:
+-- {
+--   id, barcode, rarity, weightKg, flavor,
+--   affix = { stat, percent },  -- percent строка вида "+7.5%"
+--   createdAt, owner
+-- }
 local DEFAULTS = {
-	GooDNA = 0,
-	Level  = 1,
-	XP     = 0,
-	Likes  = 0,
+	GooDNA    = 0,
+	Level     = 1,
+	XP        = 0,
+	Likes     = 0,
+	Blocks    = {},
+	PityCount = 0,
 }
 
--- Хранилище профилей
 local profileStore = ProfileService.GetProfileStore("DinoMorph_Profile_v1", DEFAULTS)
+local Profiles : { [Player]: any } = {}
 
--- Активные профили по игрокам
-local Profiles: { [Player]: any } = {}
+-- Клиентское событие "сохранилось"
+local saveEvent = ReplicatedStorage:FindFirstChild("AutoSaveEvent") :: RemoteEvent?
+if not saveEvent then
+	saveEvent = Instance.new("RemoteEvent")
+	saveEvent.Name = "AutoSaveEvent"
+	saveEvent.Parent = ReplicatedStorage
+end
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local saveEvent = Instance.new("RemoteEvent")
-saveEvent.Name = "AutoSaveEvent"
-saveEvent.Parent = ReplicatedStorage
+-- ---------- УТИЛИТЫ ----------
+local function shortId(id: string): string
+	return string.sub(id, 1, 8)
+end
 
+-- Создание Value-детей
+local function newString(name: string, value: string?, parent: Instance)
+	local v = Instance.new("StringValue")
+	v.Name = name
+	v.Value = value or ""
+	v.Parent = parent
+	return v
+end
 
+local function newNumber(name: string, value: number?, parent: Instance)
+	local v = Instance.new("NumberValue")
+	v.Name = name
+	v.Value = value or 0
+	v.Parent = parent
+	return v
+end
 
--- Создаём только нужное для leaderboard + скрытую папку для прочих статов
+local function newInt(name: string, value: number?, parent: Instance)
+	local v = Instance.new("IntValue")
+	v.Name = name
+	v.Value = typeof(value) == "number" and math.floor(value :: number) or 0
+	v.Parent = parent
+	return v
+end
+
+-- ---------- СЕРИАЛИЗАЦИЯ БЛОКА (Folder -> table) ----------
+local function readStr(folder: Instance, name: string): string?
+	local v = folder:FindFirstChild(name)
+	return (v and v:IsA("StringValue")) and v.Value or nil
+end
+
+local function readNum(folder: Instance, name: string): number?
+	local v = folder:FindFirstChild(name)
+	return (v and v:IsA("NumberValue")) and v.Value or nil
+end
+
+local function readInt(folder: Instance, name: string): number?
+	local v = folder:FindFirstChild(name)
+	return (v and v:IsA("IntValue")) and v.Value or nil
+end
+
+local function serializeBlockFolder(blockFolder: Folder): {[string]: any}
+	-- ожидаем:
+	-- Id(String), Barcode(String), Rarity(String), WeightKg(Number), Flavor(String),
+	-- CreatedAt(Int), Owner(Int),
+	-- Affix(Folder) -> Stat(String), PercentStr(String)
+	local affixFolder = blockFolder:FindFirstChild("Affix")
+	local affix = nil
+	if affixFolder and affixFolder:IsA("Folder") then
+		affix = {
+			stat    = readStr(affixFolder, "Stat"),
+			percent = readStr(affixFolder, "PercentStr"),
+		}
+	end
+
+	return {
+		id        = readStr(blockFolder, "Id") or HttpService:GenerateGUID(false),
+		barcode   = readStr(blockFolder, "Barcode"),
+		rarity    = readStr(blockFolder, "Rarity"),
+		weightKg  = readNum(blockFolder, "WeightKg"),
+		flavor    = readStr(blockFolder, "Flavor"),
+		affix     = affix,
+		createdAt = readInt(blockFolder, "CreatedAt"),
+		owner     = readInt(blockFolder, "Owner"),
+	}
+end
+
+local function serializeBlocksFolder(blocksFolder: Folder): {{[string]: any}}
+	local out = {}
+	for _, child in ipairs(blocksFolder:GetChildren()) do
+		if child:IsA("Folder") then
+			table.insert(out, serializeBlockFolder(child))
+		end
+	end
+	return out
+end
+
+-- ---------- РАЗГИДРАТАЦИЯ (table -> Folder с Value-детями) ----------
+local function hydrateBlockFolder(data: {[string]: any}): Folder
+	local id = typeof(data.id) == "string" and data.id or HttpService:GenerateGUID(false)
+	local block = Instance.new("Folder")
+	block.Name = ("Block_%s"):format(shortId(id))
+
+	newString("Id",        id,                  block)
+	newString("Barcode",   data.barcode,        block)
+	newString("Rarity",    data.rarity,         block)
+	newNumber("WeightKg",  tonumber(data.weightKg), block)
+	newString("Flavor",    data.flavor,         block)
+	newInt("CreatedAt",    tonumber(data.createdAt), block)
+	newInt("Owner",        tonumber(data.owner), block)
+
+	local affixData = data.affix
+	local affixFolder = Instance.new("Folder")
+	affixFolder.Name = "Affix"
+	affixFolder.Parent = block
+	newString("Stat",       affixData and tostring(affixData.stat) or "",  affixFolder)
+	newString("PercentStr", affixData and tostring(affixData.percent) or "", affixFolder)
+
+	return block
+end
+
+local function hydrateBlocksFolder(blocksFolder: Folder, dataArray: {{[string]: any}}?)
+	blocksFolder:ClearAllChildren()
+	for _, data in ipairs(dataArray or {}) do
+		local inst = hydrateBlockFolder(data)
+		inst.Parent = blocksFolder
+	end
+end
+
+-- ---------- ЛАЙВ-СИНХРОНИЗАЦИЯ (любые изменения -> профиль) ----------
+local function hookBlocksAutoSync(blocksFolder: Folder, profile)
+	local function resave()
+		if profile and profile:IsActive() then
+			profile.Data.Blocks = serializeBlocksFolder(blocksFolder)
+		end
+	end
+
+	-- Подписки на любые изменения значений
+	local function wire(obj: Instance)
+		if obj:IsA("ValueBase") then
+			obj.Changed:Connect(resave)
+		end
+	end
+
+	-- Существующие
+	for _, d in ipairs(blocksFolder:GetDescendants()) do
+		wire(d)
+	end
+
+	-- Новые/удалённые
+	blocksFolder.DescendantAdded:Connect(function(obj)
+		wire(obj)
+		resave()
+		end)
+	blocksFolder.DescendantRemoving:Connect(function(_)
+		resave()
+	end)
+
+	blocksFolder.ChildAdded:Connect(resave)
+	blocksFolder.ChildRemoved:Connect(resave)
+
+	-- Первичный снимок
+	resave()
+end
+
+-- ---------- Привязка контейнеров и значений игрока ----------
 local function attachStatsContainers(player: Player, profile)
-	-- В leaderboard пойдёт только валюта
+	-- leaderstats
 	local leaderstats = Instance.new("Folder")
 	leaderstats.Name = "leaderstats"
 	leaderstats.Parent = player
@@ -40,9 +199,9 @@ local function attachStatsContainers(player: Player, profile)
 	goo.Value = profile.Data.GooDNA
 	goo.Parent = leaderstats
 
-	-- Скрытые статы (не попадают в leaderboard)
+	-- скрытые статы
 	local hidden = Instance.new("Folder")
-	hidden.Name = "PlayerData"    -- можно переименовать; главное, НЕ "leaderstats"
+	hidden.Name = "PlayerData"
 	hidden.Parent = player
 
 	local level = Instance.new("IntValue")
@@ -60,71 +219,73 @@ local function attachStatsContainers(player: Player, profile)
 	likes.Value = profile.Data.Likes
 	likes.Parent = hidden
 
-	-- Двусторонняя синхронизация: изменения в Value -> в профиль
-	local function pushToProfile()
+	-- инвентарь
+	local blocks = Instance.new("Folder")
+	blocks.Name = "Blocks"
+	blocks.Parent = player
+
+	-- восстановление из профиля
+	hydrateBlocksFolder(blocks, profile.Data.Blocks)
+	hookBlocksAutoSync(blocks, profile)
+
+	-- pity как атрибут игрока (можно тоже сделать IntValue, но оставим как атрибут)
+	player:SetAttribute("PityCount", tonumber(profile.Data.PityCount) or 0)
+
+	-- пуш базовых статов
+	local function pushBase()
 		if profile and profile:IsActive() then
-			profile.Data.GooDNA = goo.Value
-			profile.Data.Level  = level.Value
-			profile.Data.XP     = xp.Value
-			profile.Data.Likes  = likes.Value
+            profile.Data.GooDNA    = goo.Value
+            profile.Data.Level     = level.Value
+            profile.Data.XP        = xp.Value
+            profile.Data.Likes     = likes.Value
+            profile.Data.PityCount = player:GetAttribute("PityCount") or 0
 		end
 	end
-
-	goo.Changed:Connect(pushToProfile)
-	level.Changed:Connect(pushToProfile)
-	xp.Changed:Connect(pushToProfile)
-	likes.Changed:Connect(pushToProfile)
-
-	-- На всякий случай — хелпер, если где‑то в коде меняешь профиль напрямую:
-	local function pullFromProfile()
-		if profile and profile:IsActive() then
-			if goo.Value   ~= profile.Data.GooDNA then goo.Value   = profile.Data.GooDNA end
-			if level.Value ~= profile.Data.Level  then level.Value = profile.Data.Level  end
-			if xp.Value    ~= profile.Data.XP     then xp.Value    = profile.Data.XP     end
-			if likes.Value ~= profile.Data.Likes  then likes.Value = profile.Data.Likes  end
-		end
-	end
-
-	-- Можно вызвать при загрузке/после покупок и т.п.
-	profile._pullToValues = pullFromProfile
+	goo.Changed:Connect(pushBase)
+	level.Changed:Connect(pushBase)
+	xp.Changed:Connect(pushBase)
+	likes.Changed:Connect(pushBase)
+	player:GetAttributeChangedSignal("PityCount"):Connect(pushBase)
 end
 
--- Автосейв каждые 60 секунд
+-- ---------- Автосейв ----------
 task.spawn(function()
 	while true do
-		task.wait(60)
+		task.wait(300)
 		for player, profile in pairs(Profiles) do
 			if profile:IsActive() then
+				-- финальная синхронизация инвентаря перед сейвом
+				local blocksFolder = player:FindFirstChild("Blocks")
+				if blocksFolder then
+					profile.Data.Blocks = serializeBlocksFolder(blocksFolder)
+				end
+				profile.Data.PityCount = player:GetAttribute("PityCount") or 0
+
 				profile:Save()
-				-- Сообщаем клиенту, что автосейв произошёл
-				saveEvent:FireClient(player)
+				if saveEvent then saveEvent:FireClient(player) end
 			end
 		end
 	end
 end)
 
-
--- Загрузка профиля игрока
+-- ---------- Жизненный цикл профиля ----------
 local function onPlayerAdded(player: Player)
 	local profile = profileStore:LoadProfileAsync("Player_" .. player.UserId, "ForceLoad")
-
 	if not profile then
 		player:Kick("Не удалось загрузить данные.")
 		return
 	end
 
 	profile:AddUserId(player.UserId)
-	profile:Reconcile() -- добавит недостающие поля из DEFAULTS
+	profile:Reconcile()
 
-	-- Если профиль где‑то ещё уже загружен — кикнем этого игрока
 	profile:ListenToRelease(function()
 		Profiles[player] = nil
 		if player.Parent then
-			player:Kick("Данные выгружены (возможно повторный вход).")
+			player:Kick("Данные выгружены (повторный вход?).")
 		end
 	end)
 
-	-- Если игрок всё ещё в игре — активируем профиль
 	if player.Parent == Players then
 		Profiles[player] = profile
 		attachStatsContainers(player, profile)
@@ -133,20 +294,27 @@ local function onPlayerAdded(player: Player)
 	end
 end
 
--- Сохранение при выходе игрока
 local function onPlayerRemoving(player: Player)
 	local profile = Profiles[player]
 	if profile then
+		local blocksFolder = player:FindFirstChild("Blocks")
+		if blocksFolder then
+			profile.Data.Blocks = serializeBlocksFolder(blocksFolder)
+		end
+		profile.Data.PityCount = player:GetAttribute("PityCount") or 0
 		profile:Save()
 		profile:Release()
 	end
 end
 
--- Корректное завершение сервера — сохранение всех
 game:BindToClose(function()
-	-- В Studio во время Play тут может быть несколько секунд
 	for player, profile in pairs(Profiles) do
 		if profile:IsActive() then
+			local blocksFolder = player:FindFirstChild("Blocks")
+			if blocksFolder then
+				profile.Data.Blocks = serializeBlocksFolder(blocksFolder)
+			end
+			profile.Data.PityCount = player:GetAttribute("PityCount") or 0
 			profile:Save()
 			profile:Release()
 		end
