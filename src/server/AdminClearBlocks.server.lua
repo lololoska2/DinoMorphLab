@@ -39,6 +39,19 @@ local function chooseOne<T>(list: {T}): T
 	return list[math.random(1, #list)]
 end
 
+local function chooseWeighted(weights: {[string]: number}): string
+	local total = 0
+	for _, w in pairs(weights) do total += w end
+	local r = math.random() * total
+	local acc = 0
+	for key, w in pairs(weights) do
+		acc += w
+		if r <= acc then return key end
+	end
+	for k, _ in pairs(weights) do return k end -- fallback
+	return "Unknown"
+end
+
 local function randRange(minVal: number, maxVal: number): number
 	return minVal + math.random() * (maxVal - minVal)
 end
@@ -109,6 +122,24 @@ local function storeBlockInstance(player: Player, data: {[string]: any}): Folder
 	return blockFolder
 end
 
+-- ==== ВЫБОР FLAVOR ПО РЕДКОСТИ (совместимо с новой конфигурацией) ====
+local function pickFlavorByRarity(rarity: string): string
+	-- Новый путь: таблица весов внутри редкости
+	local byRarity = (Config :: any).FLAVORS_BY_RARITY
+	if byRarity and byRarity[rarity] then
+		local weights = byRarity[rarity] :: {[string]: number}
+		if weights and next(weights) ~= nil then
+			return chooseWeighted(weights)
+		end
+	end
+	-- Fallback (если остался старый список Config.FLAVORS)
+	local list = (Config :: any).FLAVORS
+	if list and typeof(list) == "table" and #list > 0 then
+		return chooseOne(list)
+	end
+	return "Unknown"
+end
+
 -- ==== ГЕНЕРАЦИЯ ДАННЫХ БЛОКА (совместимо с DNAService) ====
 local function generateBlockFor(player: Player, forcedRarity: string?): {[string]: any}
 	local rarity = forcedRarity or "Common"
@@ -124,12 +155,15 @@ local function generateBlockFor(player: Player, forcedRarity: string?): {[string
 	local affixPercent = randRange(range.min, range.max) * 100
 	affixPercent = math.floor(affixPercent * 10 + 0.5) / 10
 
+	-- flavor по редкости (новая логика)
+	local flavor = pickFlavorByRarity(rarity)
+
 	return {
 		id        = HttpService:GenerateGUID(false),
 		barcode   = makeBarcode(player),
 		rarity    = rarity,
 		weightKg  = weightKg,
-		flavor    = chooseOne(Config.FLAVORS),
+		flavor    = flavor,
 		affix     = {
 			stat    = affixStat,
 			percent = string.format("%+.1f%%", affixPercent),

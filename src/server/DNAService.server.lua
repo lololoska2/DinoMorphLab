@@ -167,7 +167,13 @@ local function generateBlock(player: Player): {[string]: any}
 	local affixPercent = randRange(range.min, range.max) * 100
 	affixPercent = math.floor(affixPercent * 10 + 0.5) / 10 -- до 0.1%
 
-	local flavor  = chooseOne(Config.FLAVORS)
+	-- Flavor по редкости с внутренними шансами
+	local flavor = "Unknown"
+	local flavorWeights = Config.FLAVORS_BY_RARITY and Config.FLAVORS_BY_RARITY[rarity]
+	if flavorWeights then
+		flavor = chooseWeighted(flavorWeights)
+	end
+
 	local barcode = makeBarcode(player)
 
 	return {
