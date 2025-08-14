@@ -1,8 +1,9 @@
 -- StarterPlayerScripts/Client/Backpack.client.lua
--- DinoMorph Lab — Backpack v2.9.5
--- • Инвентарь (поиск/фильтры/сорт) + детальная модалка
--- • Сорт по редкости: rarity → flavorChance(asc) → affix%(desc)
--- • FIX: левый сайдбар и тумблеры видимы (Global ZIndex)
+-- DinoMorph Lab — Backpack v3.2
+-- • Инвентарь, фильтры, сорт (rarity → flavorChance ↑ → affix% ↓)
+-- • Детальная карточка + 3D превью ДНК.
+-- • DNA Preview: сперва берём Mesh из ReplicatedStorage/Art/DNAHelix (RailA/RailB/Axis),
+--   если нет — процедурный fallback на цилиндрах (без «бусинок»).
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -12,7 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- ======= ТЕМА =======
+-- ========= THEME =========
 local THEME = {
 	bg=Color3.fromRGB(14,16,22),
 	panel=Color3.fromRGB(20,24,32),
@@ -34,7 +35,7 @@ local TOGGLE_KEY = Enum.KeyCode.B
 local SLOT_SIZE  = Vector2.new(220,120)
 local RARITY_FILTER = { Common=true, Uncommon=true, Rare=true, Mythic=true }
 
--- ===== УТИЛИТЫ =====
+-- ========= DATA UTILS =========
 local function getBlocksFolder()
 	return player:FindFirstChild("Blocks") or player:WaitForChild("Blocks")
 end
@@ -70,7 +71,6 @@ local function readAffix(obj)
 	return nil,nil
 end
 
--- Вернёт числовой процент аффикса (с сохранением знака). Если не нашли — 0.
 local function getAffixPercent(obj)
 	local v = readValue(obj,"AffixPercent")
 	if typeof(v)=="number" then return v end
@@ -90,7 +90,7 @@ end
 local function rarityColor(r) return THEME.rarity[tostring(r)] or THEME.rarity.Common end
 local function fmtTime(ts) return (typeof(ts)=="number" and ts>0) and os.date("%d.%m.%Y %H:%M", ts) or "—" end
 
--- ===== ШАНСЫ FLAVOR (из ReplicatedStorage/Config/DNAFlavorChances) =====
+-- ========= FLAVOR CHANCES (для сортировки) =========
 local flavorCache
 local function buildFlavorCacheFromFolder(root)
 	if not root then return end
@@ -131,29 +131,227 @@ local function getFlavorDropChance(rarity, flavor)
 		if not flavorCache or next(flavorCache)==nil then buildFlavorCacheFallbackModule() end
 	end
 	local v = flavorCache and flavorCache[tostring(rarity)] and flavorCache[tostring(rarity)][tostring(flavor)]
-	return (type(v)=="number" and v) or 999 -- меньше = реже
+	return (type(v)=="number" and v) or 999 -- чем меньше — тем реже
 end
 
--- ===== GUI =====
+-- ========= UI HELPERS =========
+local function mkStroke(p,c,th,tr) local s=Instance.new("UIStroke"); s.Thickness=th or 1.5; s.Color=c or Color3.new(1,1,1); s.Transparency=tr or 0; s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=p; return s end
+local function mkCorner(p,r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 12); c.Parent=p; return c end
+local function mkLabel(p,t,sz,bold,col,alignLeft) local l=Instance.new("TextLabel"); l.BackgroundTransparency=1; l.Text=t or ""; l.Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham; l.TextSize=sz or 14; l.TextColor3=col or THEME.text; l.TextXAlignment=(alignLeft==false and Enum.TextXAlignment.Right) or Enum.TextXAlignment.Left; l.Parent=p; return l end
+
+-- ========= DNA PREVIEW (ViewportFrame) =========
+local preview = {}
+
+local function hashString(s) local h=0; for i=1,#(s or "") do h=(h*33 + string.byte(s,i))%360 end; return h/360 end
+local function colorFromFlavor(name) return Color3.fromHSV(hashString(tostring(name or "")), 0.55, 0.95) end
+local function colorFromStat(stat)
+	stat = tostring(stat or ""):lower()
+	if stat=="speed" then return Color3.fromRGB(80,220,255)
+	elseif stat=="stamina" then return Color3.fromRGB(255,205,70)
+	elseif stat=="hp" or stat=="health" then return Color3.fromRGB(255,120,150)
+	elseif stat=="jump" then return Color3.fromRGB(120,255,140)
+	elseif stat=="grip" then return Color3.fromRGB(200,120,255)
+	else return Color3.fromRGB(210,210,230) end
+end
+local function clamp(x,a,b) if x<a then return a elseif x>b then return b else return x end end
+
+local function buildPart(parent, size, cf, color, material, shape, tr)
+	local p=Instance.new("Part")
+	p.Anchored=true; p.CanCollide=false; p.CastShadow=false
+	p.Size=size; p.CFrame=cf or CFrame.new()
+	p.Material=material or Enum.Material.SmoothPlastic
+	p.Color=color or Color3.new(1,1,1)
+	p.Transparency=tr or 0
+	p.TopSurface=Enum.SurfaceType.Smooth; p.BottomSurface=Enum.SurfaceType.Smooth
+	if shape=="Cylinder" then p.Shape=Enum.PartType.Cylinder end
+	p.Parent=parent
+	return p
+end
+
+local function cylinderBetween(parent, p0, p1, radius, color, material)
+	local d = p1 - p0; local len = d.Magnitude; if len < 1e-6 then return end
+	local mid = (p0 + p1) * 0.5
+	-- цилиндр ориентирован вдоль Y
+	local cf  = CFrame.lookAt(mid, p1) * CFrame.Angles(math.pi/2, 0, 0)
+	return buildPart(parent, Vector3.new(radius*2, len, radius*2), cf, color, material or Enum.Material.SmoothPlastic, "Cylinder", 0)
+end
+
+-- Процедурная спираль без «бусинок»: много перекрытых цилиндров
+local function createDNAHelixRails(params)
+	local model = Instance.new("Model")
+	local root  = buildPart(model, Vector3.new(0.2,0.2,0.2), CFrame.new(), Color3.new(0,0,0), Enum.Material.SmoothPlastic, nil, 1)
+	model.PrimaryPart = root
+
+	local height     = params.height or 8
+	local radius     = params.radius or 1.0
+	local railR      = params.railRadius or 0.14
+	local rungR      = params.rungRadius or (railR*0.6)
+	local turns      = params.turns or 3.0
+	local segments   = params.segments or 110
+	local rungEvery  = params.rungEvery or 4
+	local overlapLen = railR * 2.2
+
+	local c1         = params.strand1Color or Color3.new(1,1,1)
+	local c2         = params.strand2Color or Color3.fromRGB(230,230,240)
+	local cRung      = params.rungColor   or Color3.new(1,1,1)
+
+	-- центральная ось (1 деталь)
+	buildPart(model, Vector3.new(railR*0.9, height, railR*0.9),
+		CFrame.new(0,0,0) * CFrame.Angles(0,0,math.rad(90)), cRung, Enum.Material.Neon, "Cylinder", 0.35)
+
+	local lastA, lastB
+	for i=0,segments do
+		local tNorm = i/segments
+		local t     = tNorm * turns * math.pi*2
+		local y     = (tNorm - 0.5) * height
+		local pA    = Vector3.new(radius*math.cos(t),        y, radius*math.sin(t))
+		local pB    = Vector3.new(radius*math.cos(t+math.pi),y, radius*math.sin(t+math.pi))
+
+		if lastA then
+			local dirA = (pA - lastA).Unit
+			cylinderBetween(model, lastA - dirA*overlapLen, pA + dirA*overlapLen, railR, c1, Enum.Material.SmoothPlastic)
+		end
+		if lastB then
+			local dirB = (pB - lastB).Unit
+			cylinderBetween(model, lastB - dirB*overlapLen, pB + dirB*overlapLen, railR, c2, Enum.Material.SmoothPlastic)
+		end
+
+		if (i % rungEvery)==0 and i>0 then
+			local rung = cylinderBetween(model, pA, pB, rungR, cRung, Enum.Material.Neon)
+			if rung then rung.Transparency = 0.55 end
+		end
+
+		lastA, lastB = pA, pB
+	end
+
+	return model
+end
+
+-- Mesh-first: используем ReplicatedStorage/Art/DNAHelix (RailA/RailB/Axis). Иначе — fallback.
+local function mountPreview(container, attrs)
+	-- очистка
+	if preview.conn then preview.conn:Disconnect() end
+	if preview.viewport then preview.viewport:Destroy() end
+	preview = {}
+
+	local viewport = Instance.new("ViewportFrame")
+	viewport.BackgroundTransparency = 1
+	viewport.Size = UDim2.fromScale(1,1)
+	viewport.ZIndex = container.ZIndex + 1
+	viewport.LightColor = Color3.fromRGB(255,255,255)
+	viewport.LightDirection = Vector3.new(-1,-1,-0.5)
+	viewport.Ambient = Color3.fromRGB(70,70,80)
+	viewport.Parent = container
+
+	local world = Instance.new("WorldModel"); world.Parent = viewport
+
+	-- параметры блока
+	local rarity  = tostring(attrs.rarity or "Common")
+	local flavor  = tostring(attrs.flavor or "")
+	local affPct  = tonumber(attrs.affPct or 0) or 0
+	local affStat = tostring(attrs.affStat or "")
+	local weight  = tonumber(attrs.weight or 1) or 1
+
+	local strand1 = rarityColor(rarity)
+	local strand2 = colorFromFlavor(flavor)
+	local rungCol = colorFromStat(affStat)
+
+	local weight01 = clamp((weight or 0)/30, 0, 1)
+	local thicknessScale = 0.85 + 0.75*weight01
+
+	-- пробуем готовую модель
+	local dnaModel
+	do
+		local art = ReplicatedStorage:FindFirstChild("Art")
+		local src = art and art:FindFirstChild("DNAHelix")
+		if src and src:IsA("Model") then
+			dnaModel = src:Clone()
+			dnaModel.Parent = world
+			local pp = dnaModel:FindFirstChild("Pivot") or dnaModel.PrimaryPart or dnaModel:FindFirstChildWhichIsA("BasePart")
+			if pp then dnaModel.PrimaryPart = pp end
+
+			local railA = dnaModel:FindFirstChild("RailA")
+			local railB = dnaModel:FindFirstChild("RailB")
+			local axis  = dnaModel:FindFirstChild("Axis")
+
+			for _,rail in ipairs({railA, railB}) do
+				if rail and rail:IsA("BasePart") then
+					rail.Material = Enum.Material.SmoothPlastic
+					-- толщина зависит от веса (по X/Z)
+					local s = rail.Size
+					rail.Size = Vector3.new(s.X*thicknessScale, s.Y, s.Z*thicknessScale)
+				end
+			end
+			if railA then railA.Color = strand1 end
+			if railB then railB.Color = strand2 end
+			if axis and axis:IsA("BasePart") then
+				axis.Color = rungCol; axis.Material = Enum.Material.Neon; axis.Transparency = 0.35
+			end
+			if dnaModel.PrimaryPart then
+				dnaModel:PivotTo(CFrame.new(0,0,0))
+			end
+		end
+	end
+
+	-- fallback — процедурная спираль
+	if not dnaModel then
+		local turnsByRarity = {Common=2.2, Uncommon=2.6, Rare=3.0, Mythic=3.6}
+		local turns = turnsByRarity[rarity] or 2.6
+		local radius = 0.85 + 0.75*weight01
+		local railR  = 0.11 + 0.13*weight01
+
+		dnaModel = createDNAHelixRails({
+			height = 8, radius = radius, railRadius = railR, rungRadius = railR*0.6,
+			turns = turns, segments = 110, rungEvery = 4,
+			strand1Color = strand1, strand2Color = strand2, rungColor = rungCol
+		})
+		dnaModel.Parent = world
+	end
+
+	-- камера
+	local cam = Instance.new("Camera")
+	cam.CFrame = CFrame.new(Vector3.new(0,1.2,7), Vector3.new(0,0.2,0))
+	cam.Parent = viewport
+	viewport.CurrentCamera = cam
+
+	-- вращение от процента аффикса
+	local dir   = (affPct >= 0) and 1 or -1
+	local speed = dir * (0.35 + math.min(math.abs(affPct)/100, 2.0) * 0.6)
+
+	preview.conn = RunService.RenderStepped:Connect(function(dt)
+		if dnaModel and dnaModel.PrimaryPart then
+			dnaModel:SetPrimaryPartCFrame(dnaModel.PrimaryPart.CFrame * CFrame.Angles(0, speed*dt*math.pi*2, 0))
+		end
+	end)
+
+	preview.viewport = viewport
+	preview.world    = world
+	preview.model    = dnaModel
+end
+
+-- ========= GUI (панели, грид, модалка) =========
 local gui, dim, root, sidebar, gridScroll, gridLayout, searchBox, sortDrop, titleLbl, countLbl
 local detailDim, detailRoot, detailPreview, detailInfo, detailTitle, detailRarity, detailScroll, detailListLayout
 local currentDetailBlock, currentAttrConn
 local rebuild
 
-local function mkStroke(p,c,th,tr) local s=Instance.new("UIStroke"); s.Thickness=th or 1.5; s.Color=c or Color3.new(1,1,1); s.Transparency=tr or 0; s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=p; return s end
-local function mkCorner(p,r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 12); c.Parent=p; return c end
-local function mkLabel(p,t,sz,bold,col,alignLeft) local l=Instance.new("TextLabel"); l.BackgroundTransparency=1; l.Text=t or ""; l.Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham; l.TextSize=sz or 14; l.TextColor3=col or THEME.text; l.TextXAlignment=(alignLeft==false and Enum.TextXAlignment.Right) or Enum.TextXAlignment.Left; l.Parent=p; return l end
-local function closeDetails() if detailDim then detailDim.Visible=false end; if detailRoot then detailRoot.Visible=false end; if currentAttrConn then currentAttrConn:Disconnect(); currentAttrConn=nil end; currentDetailBlock=nil end
+local function closeDetails()
+	if detailDim then detailDim.Visible=false end
+	if detailRoot then detailRoot.Visible=false end
+	if currentAttrConn then currentAttrConn:Disconnect(); currentAttrConn=nil end
+	if preview.conn then preview.conn:Disconnect() end
+	if preview.viewport then preview.viewport:Destroy() end
+	preview = {}
+	currentDetailBlock=nil
+end
 
--- тумблер редкости с корректным ZIndex
 local function makeRarityToggle(name, color, baseZ)
-	baseZ = baseZ or 822  -- панель = 820 → делаем выше
+	baseZ = baseZ or 822
 	local btn = Instance.new("TextButton")
 	btn.AutoButtonColor=false; btn.Text=""; btn.BackgroundColor3=THEME.panel; btn.Size=UDim2.fromOffset(206,28); btn.ZIndex=baseZ
 	mkCorner(btn,8)
 
-	local chip = Instance.new("Frame")
-	chip.Size=UDim2.fromOffset(14,14); chip.Position=UDim2.fromOffset(8,7); chip.BackgroundColor3=color; chip.ZIndex=baseZ+1
+	local chip = Instance.new("Frame"); chip.Size=UDim2.fromOffset(14,14); chip.Position=UDim2.fromOffset(8,7); chip.BackgroundColor3=color; chip.ZIndex=baseZ+1
 	mkCorner(chip,7); chip.Parent=btn
 
 	local label = Instance.new("TextLabel")
@@ -172,6 +370,7 @@ local function makeRarityToggle(name, color, baseZ)
 			btn.BackgroundColor3=THEME.panel; label.TextColor3=THEME.textDim; stroke.Transparency=0.6; chip.BackgroundTransparency=0.3
 		end
 	end
+
 	btn.MouseEnter:Connect(function() stroke.Transparency = on and 0.08 or 0.5 end)
 	btn.MouseLeave:Connect(refresh)
 	btn.Activated:Connect(function() on = not on; refresh(); rebuild() end)
@@ -182,7 +381,7 @@ end
 local function ensureGui()
 	if gui then return end
 	gui=Instance.new("ScreenGui"); gui.Name="BackpackV2"; gui.IgnoreGuiInset=true; gui.ResetOnSpawn=false; gui.Parent=playerGui
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global  -- важное
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 
 	dim=Instance.new("Frame"); dim.BackgroundColor3=THEME.bg; dim.BackgroundTransparency=0.35; dim.Size=UDim2.fromScale(1,1); dim.Visible=false; dim.Parent=gui; dim.ZIndex=800
 
@@ -213,7 +412,6 @@ local function ensureGui()
 	searchBox.Font=Enum.Font.Gotham; searchBox.TextSize=14; searchBox.TextColor3=THEME.text; searchBox.BackgroundColor3=THEME.panel
 	searchBox.Size=UDim2.fromOffset(206,32); searchBox.Parent=sidebar; searchBox.ZIndex=822; mkCorner(searchBox,10); mkStroke(searchBox,Color3.fromRGB(60,72,96),1,0.4).ZIndex=823
 
-	-- чтобы элементы шли столбцом
 	local uiList=Instance.new("UIListLayout"); uiList.SortOrder=Enum.SortOrder.LayoutOrder; uiList.Padding=UDim.new(0,10); uiList.Parent=sidebar
 
 	mkSideLabel("Rarity")
@@ -235,7 +433,7 @@ local function ensureGui()
 	local gridPad=Instance.new("UIPadding"); gridPad.PaddingLeft=UDim.new(0,12); gridPad.PaddingRight=UDim.new(0,8); gridPad.PaddingTop=UDim.new(0,6); gridPad.PaddingBottom=UDim.new(0,6); gridPad.Parent=gridScroll
 	gridLayout=Instance.new("UIGridLayout"); gridLayout.CellPadding=UDim2.fromOffset(10,10); gridLayout.CellSize=UDim2.fromOffset(SLOT_SIZE.X,SLOT_SIZE.Y); gridLayout.SortOrder=Enum.SortOrder.LayoutOrder; gridLayout.Parent=gridScroll
 
-	-- Детальная модалка (поверх всего)
+	-- Детальная модалка
 	detailDim=Instance.new("Frame"); detailDim.BackgroundColor3=Color3.new(0,0,0); detailDim.BackgroundTransparency=0.4; detailDim.Size=UDim2.fromScale(1,1); detailDim.Visible=false; detailDim.ZIndex=900; detailDim.Active=true; detailDim.Parent=gui
 	detailRoot=Instance.new("Frame"); detailRoot.AnchorPoint=Vector2.new(0.5,0.5); detailRoot.Position=UDim2.fromScale(0.5,0.5); detailRoot.Size=UDim2.new(0,820,0,520)
 	detailRoot.BackgroundColor3=THEME.panel; detailRoot.Visible=false; detailRoot.ZIndex=910; detailRoot.Parent=gui; mkCorner(detailRoot,16); mkStroke(detailRoot,THEME.panelEdge,2,0.25).ZIndex=911
@@ -271,13 +469,11 @@ local function addRow(name,value)
 	local left=mkLabel(row,tostring(name),14,true,THEME.text,true); left.Size=UDim2.new(0.4,-6,1,0); left.ZIndex=918
 	local right=mkLabel(row,tostring(value),14,false,THEME.textDim,true); right.Size=UDim2.new(0.6,0,1,0); right.Position=UDim2.new(0.4,0,0,0); right.ZIndex=918
 end
-
 local function clearDetails()
 	for _,c in ipairs(detailScroll:GetChildren()) do
 		if c:IsA("GuiObject") and c.Name=="Row" then c:Destroy() end
 	end
 end
-
 local function finalizeDetailCanvas()
 	RunService.Heartbeat:Wait()
 	detailScroll.CanvasSize = UDim2.fromOffset(detailListLayout.AbsoluteContentSize.X, detailListLayout.AbsoluteContentSize.Y)
@@ -320,6 +516,16 @@ local function openDetails(blockObj)
 			addRow("Affix.Raw.Stat",st.Value)
 		end
 	end
+
+	-- Монтируем 3D превью
+	local affPctNum = getAffixPercent(blockObj)
+	mountPreview(detailPreview, {
+		rarity = rarity,
+		flavor = flavor,
+		affPct = affPctNum,
+		affStat= readValue(blockObj,"AffixStat") or (aff and aff:FindFirstChild("Stat") and aff.Stat.Value),
+		weight = weight or 1,
+	})
 
 	finalizeDetailCanvas()
 
@@ -385,7 +591,7 @@ local function sortFunc(mode)
 		elseif mode==4 then
 			return (readValue(a,"WeightKg") or 0) < (readValue(b,"WeightKg") or 0)
 		elseif mode==5 then
-			-- Rarity ↓: редкие → обычные → (tie) реже flavor → (tie) бОльший % аффикса → дата
+			-- Rarity ↓: редкие раньше → tie: реже flavor → tie: больший % аффикса → дата
 			if ra ~= rb then return ra > rb end
 			local fa = tostring(readValue(a,"Flavor") or "")
 			local fb = tostring(readValue(b,"Flavor") or "")
@@ -396,7 +602,7 @@ local function sortFunc(mode)
 			if pa ~= pb then return pa > pb end
 			return (readValue(a,"CreatedAt") or 0) > (readValue(b,"CreatedAt") or 0)
 		else
-			-- Rarity ↑: обычные → редкие → (tie) реже flavor → (tie) бОльший % аффикса → дата
+			-- Rarity ↑: обычные раньше → tie: реже flavor → tie: больший % аффикса → дата
 			if ra ~= rb then return ra < rb end
 			local fa = tostring(readValue(a,"Flavor") or "")
 			local fb = tostring(readValue(b,"Flavor") or "")
@@ -435,7 +641,7 @@ rebuild = function()
 	makeAndAddSlots(list)
 end
 
--- Провода
+-- Подписки
 local connsBlocks={}
 local function wire()
 	for _,c in ipairs(connsBlocks) do pcall(function() c:Disconnect() end) end
